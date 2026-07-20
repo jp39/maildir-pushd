@@ -329,8 +329,6 @@ func (d *daemon) runFilter(ctx context.Context, candidate filterCandidate) (bool
 	if d.opts.FilterCmd == "-" {
 		return false, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, d.opts.FilterTimeout)
-	defer cancel()
 
 	env := []string{
 		"MAILDIR_PUSHD_ROOT=" + d.opts.Root,
@@ -342,6 +340,8 @@ func (d *daemon) runFilter(ctx context.Context, candidate filterCandidate) (bool
 
 	d.logf("filter %s", candidate.Path)
 	err := d.withLock(ctx, func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, d.opts.FilterTimeout)
+		defer cancel()
 		return runShell(ctx, d.opts.FilterCmd, env, d.opts.Out)
 	})
 	var exitErr *exec.ExitError
@@ -359,11 +359,11 @@ func (d *daemon) runPush(ctx context.Context) error {
 		d.logf("push skipped: no push command configured")
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, d.opts.PushTimeout)
-	defer cancel()
 
 	d.logf("push start")
 	err := d.withLock(ctx, func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, d.opts.PushTimeout)
+		defer cancel()
 		return runShell(ctx, d.opts.PushCmd, nil, d.opts.Out)
 	})
 	if err != nil {

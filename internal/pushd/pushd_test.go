@@ -1,11 +1,14 @@
 package pushd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/sys/unix"
 )
 
 func TestMailboxForCurFile(t *testing.T) {
@@ -76,6 +79,50 @@ func TestRefreshWatchesFindsCurDirs(t *testing.T) {
 	}
 	if _, ok := d.curDirs[filepath.Join(root, "not-maildir", "cur")]; ok {
 		t.Fatal("non-maildir cur directory was discovered")
+	}
+}
+
+func TestFilterTimeoutStartsAfterLockAcquired(t *testing.T) {
+	root := t.TempDir()
+	lockPath := filepath.Join(root, "mail.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	go func() {
+		defer close(release)
+		time.Sleep(700 * time.Millisecond)
+		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+	}()
+
+	d := &daemon{
+		opts: Options{
+			Root:          root,
+			Source:        "INBOX",
+			ScriptPath:    filepath.Join(root, "filter.sieve"),
+			FilterCmd:     "true",
+			LockFile:      lockPath,
+			FilterTimeout: 500 * time.Millisecond,
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	changed, err := d.runFilter(ctx, filterCandidate{
+		Path:    filepath.Join(root, "INBOX", "cur", "message:2,"),
+		Mailbox: "INBOX",
+	})
+	<-release
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("filter unexpectedly reported a change")
 	}
 }
 
