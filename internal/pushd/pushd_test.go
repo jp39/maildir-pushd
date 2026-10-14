@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
 )
 
@@ -52,7 +51,7 @@ func TestRefreshWatchesFindsCurDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	watcher, err := fsnotify.NewWatcher()
+	watcher, err := newWatcher(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,5 +131,32 @@ func mkdirMaildir(t *testing.T, path string) {
 		if err := os.MkdirAll(filepath.Join(path, name), 0700); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestOverflowRescanDoesNotRefilterHistoricalMail(t *testing.T) {
+	root := t.TempDir()
+	cur := filepath.Join(root, "INBOX", "cur")
+	mkdirMaildir(t, filepath.Dir(cur))
+	original := filepath.Join(cur, "historical,U=1:2,")
+	if err := os.WriteFile(original, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := &daemon{opts: Options{Root: root, Source: "INBOX"}, pendingFilters: map[string]filterCandidate{}}
+	if err := d.scanSource(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(original, filepath.Join(cur, "historical,U=2:2,S")); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(cur, "fresh:2,")
+	if err := os.WriteFile(fresh, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.scanSource(true); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.pendingFilters) != 1 || d.pendingFilters[fresh].Path != fresh {
+		t.Fatalf("queued %+v; want only fresh message", d.pendingFilters)
 	}
 }

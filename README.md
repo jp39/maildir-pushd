@@ -62,6 +62,15 @@ The default filter command expects
 [`maildir-sieve`](https://github.com/jp39/maildir-sieve) to be available in
 `PATH`.
 
+## macOS
+
+With cgo enabled, macOS builds use a recursive FSEvents stream for the Maildir
+root. This avoids the per-message file descriptors required by fsnotify's
+kqueue backend on macOS, which can exhaust the process limit on large mailboxes.
+File creation, flag renames, removals, and newly created mailboxes still use the
+same filtering and push pipeline. Other platforms, and builds without cgo,
+continue to use fsnotify.
+
 ## Usage
 
 `maildir-pushd` needs an explicit push command:
@@ -206,6 +215,7 @@ go build ./cmd/maildir-pushd
 dependencies are permissively licensed:
 
 - `github.com/fsnotify/fsnotify`: BSD-3-Clause style license.
+- `github.com/fsnotify/fsevents` (native macOS builds): BSD-3-Clause style license.
 - `golang.org/x/sys`: BSD-3-Clause style license.
 
 These licenses do not prevent publishing this project under MIT.

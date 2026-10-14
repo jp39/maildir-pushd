@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -44,11 +45,12 @@ type batch struct {
 
 type daemon struct {
 	opts           Options
-	watcher        *fsnotify.Watcher
+	watcher        *mailWatcher
 	watched        map[string]struct{}
 	curDirs        map[string]struct{}
 	pendingFilters map[string]filterCandidate
 	pendingPush    bool
+	sourceSeen     map[string]struct{}
 }
 
 func DefaultFilterCmd() string {
@@ -62,7 +64,7 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	watcher, err := fsnotify.NewWatcher()
+	watcher, err := newWatcher(opts.Root)
 	if err != nil {
 		return fmt.Errorf("create watcher: %w", err)
 	}
@@ -79,6 +81,9 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	if err := d.scanSource(false); err != nil {
+		return err
+	}
 	d.logf("watching %s", opts.Root)
 	return d.loop(ctx)
 }
@@ -151,6 +156,19 @@ func (d *daemon) loop(ctx context.Context) error {
 				return nil
 			}
 			d.logf("watcher error: %v", err)
+			if errors.Is(err, errWatchRootChanged) {
+				return err
+			}
+			if errors.Is(err, errWatchRescan) {
+				if scanErr := d.refreshWatches(); scanErr != nil {
+					return scanErr
+				}
+				if scanErr := d.scanSource(true); scanErr != nil {
+					return scanErr
+				}
+				d.pendingPush = true
+				armTimer(timer, d.opts.Debounce)
+			}
 		case <-rescan.C:
 			if err := d.refreshWatches(); err != nil {
 				d.logf("rescan failed: %v", err)
@@ -250,6 +268,10 @@ func (d *daemon) handleEvent(event fsnotify.Event) bool {
 
 	d.pendingPush = true
 	if event.Op&fsnotify.Create != 0 && mailbox == d.opts.Source && fileExists(path) {
+		if d.sourceSeen == nil {
+			d.sourceSeen = map[string]struct{}{}
+		}
+		d.sourceSeen[sourceIdentity(path)] = struct{}{}
 		d.pendingFilters[path] = filterCandidate{Path: path, Mailbox: mailbox}
 		d.logf("queue filter %s", path)
 	}
@@ -472,4 +494,40 @@ func defaultHome() string {
 		return "."
 	}
 	return home
+}
+
+var sourceUIDMarker = regexp.MustCompile(`,U=\d+`)
+
+func sourceIdentity(path string) string {
+	stem, _, _ := strings.Cut(filepath.Base(path), ":")
+	return sourceUIDMarker.ReplaceAllString(stem, "")
+}
+
+// scanSource recovers missed acknowledgements after an FSEvents overflow.
+// Remembering identities avoids rerunning copy rules for historical messages
+// or for filenames that changed only in flags or mbsync UID assignment.
+func (d *daemon) scanSource(queueNew bool) error {
+	if d.sourceSeen == nil {
+		d.sourceSeen = map[string]struct{}{}
+	}
+	sourceCur := filepath.Join(d.opts.Root, filepath.FromSlash(d.opts.Source), "cur")
+	entries, err := os.ReadDir(sourceCur)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(sourceCur, entry.Name())
+		identity := sourceIdentity(path)
+		if _, seen := d.sourceSeen[identity]; queueNew && !seen {
+			d.pendingFilters[path] = filterCandidate{Path: path, Mailbox: d.opts.Source}
+		}
+		d.sourceSeen[identity] = struct{}{}
+	}
+	return nil
 }
